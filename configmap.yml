@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: 0311at-config
+  namespace: 0311at-web
+data:
+  APP_MODE: "casiProduction"

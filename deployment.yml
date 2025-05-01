@@ -1,0 +1,48 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: webapp-deployment
+  namespace: 0311at-web
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: webapp
+  template:
+    metadata:
+      labels:
+        app: webapp
+    spec:
+      initContainers:
+      - name: copy-content
+        image: busybox
+        command: ['sh', '-c', 'echo "Copiando contenido..."; cp -r /mnt/website/* /usr/share/nginx/html && echo "Copia completada"']
+        volumeMounts:
+        - name: html-volume
+          mountPath: /usr/share/nginx/html
+        - name: host-volume
+          mountPath: /mnt/website
+          readOnly: true
+      containers:
+      - name: nginx
+        image: nginx:alpine  
+        ports:
+        - containerPort: 80
+        volumeMounts:
+        - name: html-volume
+          mountPath: /usr/share/nginx/html
+        envFrom:
+        - configMapRef:
+            name: 0311at-config
+        readinessProbe: 
+          httpGet:
+            path: /
+            port: 80
+          initialDelaySeconds: 5
+          periodSeconds: 5
+      volumes:
+      - name: html-volume
+        emptyDir: {}
+      - name: host-volume
+        persistentVolumeClaim:
+          claimName: 0311at-pvc-html
