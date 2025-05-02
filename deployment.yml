@@ -16,33 +16,24 @@ spec:
       initContainers:
       - name: copy-content
         image: busybox
-        command: ['sh', '-c', 'echo "Iniciando copia..."; ls -la /mnt/website; cp -v -r /mnt/website/* /usr/share/nginx/html; echo "Contenido copiado:"; ls -la /usr/share/nginx/html']
+        command: ['sh', '-c', 'echo "Verificando contenido..."; ls -la /mnt/website; mkdir -p /usr/share/nginx/html; if [ "$(ls -A /mnt/website)" ]; then cp -v /mnt/website/* /usr/share/nginx/html; echo "Copia completada"; else echo "ERROR: /mnt/website está vacío - creando placeholder"; echo "<h1>Sitio en construcción</h1>" > /usr/share/nginx/html/index.html; fi']
         volumeMounts:
         - name: html-volume
           mountPath: /usr/share/nginx/html
         - name: host-volume
           mountPath: /mnt/website
-          readOnly: true
       containers:
       - name: nginx
-        image: nginx:alpine  
+        image: nginx:alpine
         ports:
         - containerPort: 80
         volumeMounts:
         - name: html-volume
           mountPath: /usr/share/nginx/html
-        envFrom:
-        - configMapRef:
-            name: 0311at-config
-        readinessProbe: 
-          httpGet:
-            path: /
-            port: 80
-          initialDelaySeconds: 5
-          periodSeconds: 5
       volumes:
       - name: html-volume
         emptyDir: {}
       - name: host-volume
-        persistentVolumeClaim:
-          claimName: 0311at-pvc-html
+        hostPath:
+          path: /mnt/website
+          type: DirectoryOrCreate  
