@@ -16,7 +16,7 @@ spec:
       initContainers:
       - name: copy-content
         image: busybox
-        command: ['sh', '-c', 'echo "Copiando contenido..."; cp -r /mnt/website/* /usr/share/nginx/html && echo "Copia completada"']
+        command: ['sh', '-c', 'echo "Iniciando copia..."; ls -la /mnt/website; cp -v -r /mnt/website/* /usr/share/nginx/html; echo "Contenido copiado:"; ls -la /usr/share/nginx/html']
         volumeMounts:
         - name: html-volume
           mountPath: /usr/share/nginx/html
