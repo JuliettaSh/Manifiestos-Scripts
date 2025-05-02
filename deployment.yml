@@ -5,8 +5,8 @@ metadata:
   namespace: 0311at-web
 spec:
   replicas: 1
-  strategy:                
-    type: Recreate  
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: webapp
@@ -15,27 +15,22 @@ spec:
       labels:
         app: webapp
     spec:
-      initContainers:
-      - name: copy-content
-        image: busybox
-        command: ['sh', '-c', 'echo "Verificando contenido..."; ls -la /mnt/website; mkdir -p /usr/share/nginx/html; if [ "$(ls -A /mnt/website)" ]; then cp -v /mnt/website/* /usr/share/nginx/html; echo "Copia completada"; else echo "ERROR: /mnt/website está vacío - creando placeholder"; echo "<h1>Sitio en construcción</h1>" > /usr/share/nginx/html/index.html; fi']
-        volumeMounts:
-        - name: html-volume
-          mountPath: /usr/share/nginx/html
-        - name: host-volume
-          mountPath: /mnt/website
       containers:
       - name: nginx
         image: nginx:alpine
         ports:
         - containerPort: 80
         volumeMounts:
-        - name: html-volume
+        - name: host-volume
           mountPath: /usr/share/nginx/html
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 80
+          initialDelaySeconds: 5
+          periodSeconds: 5
       volumes:
-      - name: html-volume
-        emptyDir: {}
       - name: host-volume
         hostPath:
           path: /mnt/website
-          type: DirectoryOrCreate  
+          type: DirectoryOrCreate
