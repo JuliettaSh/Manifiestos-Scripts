@@ -6,7 +6,7 @@ CONFIG_FILE="${BASE_DIR}/Config.sh"
 LOG_FILE="${BASE_DIR}/deploy.log"
 # Fail Fast
 set -o errexit -o nounset -o pipefail
-# --- Cargar configuración ---
+
 # Carga de configuración con validación
 if [[ ! -f "$CONFIG_FILE" ]]; then
   echo "Error: Archivo de configuración no encontrado: $CONFIG_FILE" >&2
@@ -16,7 +16,6 @@ source "$CONFIG_FILE"
 
 # Redireccionar toda la salida al log
 exec > >(tee -a "$LOG_FILE") 2>&1
-
 
 # --- Función para mostrar configuración ---
 show_config() {
@@ -85,29 +84,42 @@ check_dependencies() {
 }
 # Función para clonar repositorios
 
-
 clone_repo() {
     local repo_url=$1
     local target_dir=$2
     
     if [ ! -d "$target_dir" ]; then
         echo "Clonando $target_dir..."
-        git clone "$repo_url" "$target_dir"
-        if [ $? -ne 0 ]; then
-            echo "Error al clonar $target_dir"
-            exit 1
-        fi
+        git clone "$repo_url" "$target_dir" || { echo "Error al clonar $target_dir"; exit 1; }
     else
         echo "El directorio $target_dir ya existe, actualizando..."
         cd "$target_dir" || exit
-        git pull
+        git pull || { echo "Error al actualizar $target_dir"; exit 1; }
         cd - || exit
     fi
 }
 
-# llamada a la funcion (pasando los parametros) para clonar ambos repositorios
+# función para aplicar manifiestos
+apply_manifests() {
+    local manifests_dir="$1"
+    
+    echo "Eliminando deployment anterior para forzar actualización..."
+    kubectl delete deployment webapp-deployment -n "$NAMESPACE" --wait=false --ignore-not-found
+    sleep 5
+    
+    echo "Aplicando manifiestos Kubernetes..."
+    minikube ssh -p "$MINIKUBE_PROFILE" -- "ls -la /mnt/website"
+    kubectl apply -f "$manifests_dir/" -n "$NAMESPACE"
+    
+    echo "Verificando versión del deployment..."
+    kubectl get deployment webapp-deployment -n "$NAMESPACE" -o yaml | \
+        grep deployment.kubernetes.io/revision
+}
+
+# Uso:
 clone_repo "$STATIC_REPO" "static-website"
 clone_repo "$MANIFESTS_REPO" "manifiestos-kubernetes"
+apply_manifests "manifiestos-kubernetes"
 
 # 2. Obtener rutas absolutas
 STATIC_PATH=$(realpath ./static-website)
@@ -147,27 +159,90 @@ ensure_minikube_running() {
 # Uso:
 ensure_minikube_running "$MINIKUBE_PROFILE" "metrics-server,ingress"
 
-# Montar el directorio estático con manejo robusto
-echo "Montando el directorio estático..."
 
-# Detener montajes previos si existen
-if pgrep -f "minikube mount.*$MOUNT_POINT" >/dev/null; then
-    echo "Deteniendo montaje previo..."
-    pkill -f "minikube mount.*$MOUNT_POINT" && sleep 2
-fi
+#Montar el directorio estático // tiene idempotencia
 
+echo "Configurando montaje..."
 
-minikube mount $STATIC_PATH:/mnt/website -p $MINIKUBE_PROFILE >/dev/null 2>&1 &
+# Detener montajes previos
+pkill -f "minikube mount" || true
+sleep 2
+
+# Montar con verificación robusta
+echo "Montando $STATIC_PATH en $MOUNT_POINT..."
+minikube mount "$STATIC_PATH:$MOUNT_POINT" -p "$MINIKUBE_PROFILE" > mount.log 2>&1 &
 MOUNT_PID=$!
-sleep 10
+sleep 5  # Espera crítica para que el montaje esté activo
 
-# Eliminar PV si ya existe
-if kubectl get pv 0311at-pv &>/dev/null; then
-    echo "Eliminando PV existente..."
-    kubectl delete pv 0311at-pv
+# Verificación exhaustiva
+echo "Verificando montaje..."
+if ! minikube ssh -p "$MINIKUBE_PROFILE" -- "test -d $MOUNT_POINT && ls $MOUNT_POINT | grep -q ."; then
+    echo "ERROR: Montaje falló - mostrando logs:"
+    cat mount.log
+    minikube ssh -p "$MINIKUBE_PROFILE" -- "ls -la $(dirname $MOUNT_POINT)"
+    exit 1
 fi
 
-# 5. Aplicar los manifiestos Kubernetes
+# Eliminación robusta de PV/PVC
+echo "Iniciando limpieza de recursos persistentes..."
+
+# 1. Primero eliminar el PVC (si existe)
+if kubectl get pvc -n $NAMESPACE 0311at-pvc-html &>/dev/null; then
+    echo "Eliminando PVC..."
+    kubectl delete pvc -n $NAMESPACE 0311at-pvc-html --wait=false --ignore-not-found
+    
+    # Esperar hasta 15 segundos para que se elimine
+    for i in {1..15}; do
+        if ! kubectl get pvc -n $NAMESPACE 0311at-pvc-html &>/dev/null; then
+            break
+        fi
+        sleep 1
+    done
+    
+    # Forzar eliminación si aún existe
+    if kubectl get pvc -n $NAMESPACE 0311at-pvc-html &>/dev/null; then
+        echo "Forzando eliminación de PVC..."
+        kubectl patch pvc -n $NAMESPACE 0311at-pvc-html -p '{"metadata":{"finalizers":null}}' --type=merge
+    fi
+fi
+
+# 2. Luego eliminar el PV (si existe)
+if kubectl get pv 0311at-pv &>/dev/null; then
+    echo "Eliminando PV..."
+    kubectl delete pv 0311at-pv --wait=false --ignore-not-found
+    
+    # Esperar hasta 15 segundos
+    for i in {1..15}; do
+        if ! kubectl get pv 0311at-pv &>/dev/null; then
+            break
+        fi
+        sleep 1
+    done
+    
+    # Forzar eliminación si aún existe
+    if kubectl get pv 0311at-pv &>/dev/null; then
+        echo "Forzando eliminación de PV..."
+        kubectl patch pv 0311at-pv -p '{"metadata":{"finalizers":null}}' --type=merge
+    fi
+fi
+
+# Espera adicional para limpieza completa
+sleep 3
+
+# 1. Forzar recreación del directorio
+minikube ssh -p "$MINIKUBE_PROFILE" -- "sudo rm -rf $MOUNT_POINT && sudo mkdir -p $MOUNT_POINT && sudo chmod 777 $MOUNT_POINT"
+
+# 2. Copiar archivos manualmente (solución garantizada)
+echo "Copiando archivos al nodo..."
+minikube cp "$STATIC_PATH/" "$MOUNT_POINT"
+
+# 3. Verificación final
+echo "Contenido actual en $MOUNT_POINT:"
+minikube ssh -p "$MINIKUBE_PROFILE" -- "ls -la $MOUNT_POINT"
+
+# Mantener el script abierto (opcional)
+read -rp "Presiona Enter para salir (el montaje seguirá activo)..."
+# Aplicar los manifiestos Kubernetes
 echo "Aplicando manifiestos YAML..."
 kubectl apply -f "$MANIFESTS_PATH/namespace.yml"
 kubectl apply -f "$MANIFESTS_PATH/configmap.yml"
@@ -176,37 +251,21 @@ kubectl apply -f "$MANIFESTS_PATH/persistenceVolumeClaim.yml"
 kubectl apply -f "$MANIFESTS_PATH/deployment.yml"
 kubectl apply -f "$MANIFESTS_PATH/service.yml"
 
-# Función para esperar a que los pods estén listos
-wait_for_pods() {
-    local namespace=$1
-    local selector=$2
-    local timeout=${3:-120}  # Valor por defecto: 120 segundos
-    local interval=${4:-5}   # Valor por defecto: 5 segundos
-    
-    echo "Esperando a que los pods con selector '$selector' estén listos..."
-    local start_time=$(date +%s)
-    
-    while true; do
-        if kubectl get pods -n "$namespace" -l "$selector" 2>/dev/null | grep -q "Running"; then
-            echo "Todos los pods están corriendo"
-            return 0
-        fi
-        
-        local current_time=$(date +%s)
-        if (( current_time - start_time > timeout )); then
-            echo "Timeout: Los pods no están listos después de $timeout segundos" >&2
-            kubectl get pods -n "$namespace"
-            return 1
-        fi
-        
-        sleep "$interval"
-    done
-}
+echo "Esperando a que los pods estén listos..."
+if ! kubectl wait --for=condition=Ready \
+   --namespace "$NAMESPACE" \
+   --selector=app=webapp \
+   pods \
+   --timeout=300s; then  # Aumenta a 5 minutos
+   
+   echo "ERROR: Pods no ready - mostrando diagnóstico:"
+   kubectl get pods -n $NAMESPACE -o wide
+   kubectl describe pods -n $NAMESPACE --selector=app=webapp
+   kubectl logs -n $NAMESPACE --selector=app=webapp --all-containers
+   exit 1
+fi
 
-# Llamar a la función de espera
-wait_for_pods "$NAMESPACE" "app=webapp" 420 5 || exit 1
-
-# 6. Exponer el servicio
+# Exponer el servicio
 echo "Exponiendo el servicio..."
 minikube service service-0311 -p "$MINIKUBE_PROFILE" -n "$NAMESPACE"
 
@@ -215,6 +274,3 @@ echo -e "\n¡Entorno listo!"
 echo "El sitio está montado desde: $STATIC_PATH"
 echo "Manifiestos aplicados desde: $MANIFESTS_PATH"
 echo "Para detener el montaje ejecuta: kill $MOUNT_PID"
-
-# Mantener el script abierto (opcional)
-read -rp "Presiona Enter para salir (el montaje seguirá activo)..."
