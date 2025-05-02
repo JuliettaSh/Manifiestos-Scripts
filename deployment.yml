@@ -14,6 +14,8 @@ spec:
     metadata:
       labels:
         app: webapp
+      annotations:
+        timestamp: "$(date +%s)"  
     spec:
       containers:
       - name: nginx
@@ -27,10 +29,16 @@ spec:
           httpGet:
             path: /
             port: 80
-          initialDelaySeconds: 5
+          initialDelaySeconds: 10  
           periodSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 80
+          initialDelaySeconds: 15
+          periodSeconds: 10
       volumes:
       - name: host-volume
         hostPath:
           path: /mnt/website
-          type: DirectoryOrCreate
+          type: Directory 
