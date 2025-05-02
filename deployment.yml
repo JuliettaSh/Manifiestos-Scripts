@@ -5,6 +5,8 @@ metadata:
   namespace: 0311at-web
 spec:
   replicas: 1
+  strategy:                
+    type: Recreate  
   selector:
     matchLabels:
       app: webapp
